@@ -2,55 +2,63 @@
 
 from fastmcp import FastMCP
 import os
-from db import SessionLocal, Meter, init_db
+from sqlalchemy import func
+
+from db import SessionLocal, Meter, MeterReading, init_db
 
 print("🚀 Starting Smart Meter MCP Server...")
 
 # Initialize DB (create tables + seed data)
 init_db()
 
-# Create MCP server instance
 mcp = FastMCP("SmartMeter")
 
 
-# ----------------------- Helper -----------------------
-def fetch_meter(meter_id: int):
-    """
-    Retrieve a Meter record from the database.
-    """
+# ----------------------- Helpers -----------------------
+def get_meter(meter_id: int):
+    """Fetch just the meter row."""
     session = SessionLocal()
-    meter = session.query(Meter).filter_by(id=meter_id).first()
-    session.close()
-    return meter
+    try:
+        return session.query(Meter).filter_by(id=meter_id).first()
+    finally:
+        session.close()
 
 
-# ----------------------- Tools ------------------------
+def get_total_usage(meter_id: int) -> float:
+    """Compute total kWh for a meter from readings."""
+    session = SessionLocal()
+    try:
+        total = (
+            session.query(func.sum(MeterReading.kwh))
+            .filter(MeterReading.meter_id == meter_id)
+            .scalar()
+        )
+        return float(total) if total is not None else 0.0
+    finally:
+        session.close()
+
+
+# ----------------------- Tools -------------------------
 @mcp.tool()
 def get_meter_info(meter_id: int) -> dict:
     """Get full meter info: name, status."""
-    m = fetch_meter(meter_id)
+    meter = get_meter(meter_id)
     return {
-        "name": m.name if m else "Unknown",
-        "status": m.status if m else "Unknown",
+        "name": meter.name if meter else "Unknown",
+        "status": meter.status if meter else "Unknown",
     }
 
 
 @mcp.tool()
 def get_usage(meter_id: int) -> float:
-    """Get total usage by summing last 30 readings."""
-    m = fetch_meter(meter_id)
-    if not m:
-        return 0.0
-    return sum(r.kwh for r in m.readings)
+    """Get total usage by summing readings."""
+    return get_total_usage(meter_id)
 
 
 @mcp.tool()
 def get_bill(meter_id: int) -> int:
-    """Compute bill based on usage * fixed rate."""
-    m = fetch_meter(meter_id)
-    if not m:
-        return 0
-    usage = sum(r.kwh for r in m.readings)
+    """Compute bill = usage * rate."""
+    usage = get_total_usage(meter_id)
     rate = 7  # ₹7 per kWh
     return int(usage * rate)
 
@@ -58,27 +66,19 @@ def get_bill(meter_id: int) -> int:
 @mcp.tool()
 def get_status(meter_id: int) -> str:
     """If usage > threshold, return High Usage."""
-    m = fetch_meter(meter_id)
-    if not m:
-        return "Unknown"
-
-    usage = sum(r.kwh for r in m.readings)
+    usage = get_total_usage(meter_id)
     return "High Usage" if usage > 400 else "OK"
 
 
 @mcp.tool()
 def get_customer_info(meter_id: int) -> str:
     """Get customer name."""
-    m = fetch_meter(meter_id)
-    return m.name if m else "Unknown Customer"
+    meter = get_meter(meter_id)
+    return meter.name if meter else "Unknown Customer"
 
 
-# ----------------------- Server -----------------------
+# ----------------------- Server ------------------------
 if __name__ == "__main__":
-    """
-    Entry point of the MCP server.
-    Starts the FastMCP SSE server.
-    """
     try:
         port = int(os.getenv("PORT", 8000))
         print(f"🌐 Starting MCP server on port {port}...")
@@ -86,9 +86,8 @@ if __name__ == "__main__":
         mcp.run(
             transport="sse",
             host="0.0.0.0",
-            port=port
+            port=port,
         )
-
     except Exception as e:
         print(f"❌ Server crashed: {e}")
         import traceback
